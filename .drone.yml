@@ -1,0 +1,6 @@
+build:
+  image: docker-registry.expend.io/build_base:latest
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+  commands:
+    - ./scripts/deploy.sh

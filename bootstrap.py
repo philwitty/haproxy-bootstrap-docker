@@ -1,59 +1,45 @@
-import configparser,os,subprocess
-import boto3
-from botocore.client import Config
+import os, subprocess, yaml
+from ex_py_commons.session import boto_session
+from ex_py_commons.file import read_file_from_url
 
-def get_object(file):
-    response = s3.get_object(
-        Bucket=bucket,
-        Key=directory+file,
-    )
-    return response['Body'].read()
+def generate_chain(chain, session):
+    result = b''
+    for cert in chain:
+        result += read_file_from_url(cert, aws_session=session)
+    return result
 
+role_arn = os.environ.get('ROLE_ARN')
+config   = os.environ['CONFIG']
 
-role_arn  = os.environ['ROLE_ARN']
-bucket    = os.environ['BUCKET']
-directory = os.environ['DIRECTORY']
-region    = os.environ['REGION']
+session = boto_session(role_arn)
 
-sts = boto3.client('sts')
-new_role = sts.assume_role(
-    RoleArn=role_arn,
-    RoleSessionName='HAProxySession',
-)
-access_key_id = new_role['Credentials']['AccessKeyId']
-secret_access_key = new_role['Credentials']['SecretAccessKey']
-session_token = new_role['Credentials']['SessionToken']
+config = yaml.load(read_file_from_url(config, aws_session=session))
 
-session = boto3.session.Session(aws_access_key_id=access_key_id,
-                                aws_secret_access_key=secret_access_key,
-                                aws_session_token=session_token,
-                                region_name=region)
+with open('/bootstrap/haproxy.cfg', 'wb') as haproxy_config:
+    url = config['HAPROXY']['config']
+    haproxy_config.write(read_file_from_url(url, aws_session=session))
 
-s3 = session.client('s3', config=Config(signature_version='s3v4'))
-
-
-if not os.path.isdir('/bootstrap'):
-        os.mkdir('/bootstrap')
-with open('/bootstrap/key.pem', 'wb') as key:
-    key.write(get_object('certificate-authority.pem'))
-with open('/bootstrap/certificate.pem', 'wb') as cert:
-    cert.write(get_object('certificate.pem'))
-with open('/bootstrap/server-certificate-chain.pem', 'wb') as chain:
-    chain.write(get_object('server-certificate-chain.pem'))
-with open('/bootstrap/config.cfg', 'wb') as config:
-    config.write(get_object('config.cfg'))
-with open('/bootstrap/haproxy.cfg', 'wb') as config:
-    config.write(get_object('haproxy.cfg'))
-
-parser = configparser.ConfigParser()
-parser.read('/bootstrap/config.cfg')
-passphrase = parser['SSL']['rsa_passphrase']
-if 'client_validation' in parser['HAPROXY']:
-    with open('/bootstrap/client-certificate-chain.pem', 'wb') as chain:
-        chain.write(get_object('client-certificate-chain.pem'))
+cert_path = '/bootstrap/certificate.pem'
+with open(cert_path, 'wb') as cert:
+    url = config['SSL']['certificate']
+    cert.write(read_file_from_url(url, aws_session=session))
+key_path = '/bootstrap/key.pem'
+with open(key_path, 'wb') as key:
+    url = config['SSL']['certificate_authority']
+    key.write(read_file_from_url(url, aws_session=session))
+passphrase = config['SSL']['certificate_authority_passphrase']
 
 # haproxy doesn't support key with passprhase so remove it
-subprocess.call(['openssl rsa -in /bootstrap/key.pem -passin pass:' + passphrase + ' -out /bootstrap/key.pem'], shell=True)
-
+subprocess.call(['openssl', 'rsa', '-in', key_path,
+                 '-passin', 'pass:' + passphrase, '-out', key_path])
 # haproxy crt requires Cert -> Key -> Chain
-subprocess.call(['cat /bootstrap/certificate.pem /bootstrap/key.pem /bootstrap/server-certificate-chain.pem > /bootstrap/server_cert.pem'], shell=True)
+subprocess.call(['cat /bootstrap/certificate.pem /bootstrap/key.pem > /bootstrap/server_cert.pem'], shell=True)
+
+if 'server_chain' in config['SSL']:
+    with open('/bootstrap/server-certificate-chain.pem', 'wb') as chain:
+        chain.write(generate_chain(config['SSL']['server_chain'], session))
+    subprocess.call(['cat /bootstrap/server-certificate-chain.pem >> /bootstrap/server_cert.pem '], shell=True)
+
+if 'client_chain' in config['SSL']:
+    with open('/bootstrap/client-certificate-chain.pem', 'wb') as chain:
+        chain.write(generate_chain(config['SSL']['client_chain'], session))

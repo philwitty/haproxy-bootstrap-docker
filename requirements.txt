@@ -1,0 +1,3 @@
+git+https://github.com/psytale/expend-python-commons.git@refreshable_session#egg=ex_py_commons
+boto3==1.1.4
+PyYAML==3.11
